@@ -28,7 +28,7 @@ from llama_index.core import PromptTemplate
 #     model_name="BAAI/bge-small-en-v1.5"
 # )
 
-Settings.text_splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=20)
+# Settings.text_splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=20)
 
 client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 import tiktoken
