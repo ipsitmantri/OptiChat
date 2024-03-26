@@ -251,7 +251,8 @@ class ChatThread(QThread):
                                            'and provide brief explanation.'}
             elif flag == 'infeasible':
                 expl_message = {'role': 'system',
-                                'content': 'Tell the user that you cannot answer such question because the model is still infeasible.'
+                                'content': 'Tell the user that you resolved the model after making the requested changes.'
+                                           'But it turned out that the model is now infeasible.'
                                            'Explain why it is not possible to perform sensitivity analysis for an infeasible model and '
                                            'suggest other ways that the user can try.'}
             elif flag == 'invalid':
@@ -475,6 +476,7 @@ class InfeasibleModelTroubleshooter(QMainWindow):
         # Combobox, Browse Button, Model Label, Process Button
         self.combobox = Combobox()
         self.combobox.setFixedWidth(180)
+        self.combobox.addItem("gpt-4-turbo-preview")
         self.combobox.addItem("gpt-4-1106-preview")
         self.combobox.addItem("gpt-4")
         self.combobox.addItem("gpt-3.5-turbo")

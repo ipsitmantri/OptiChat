@@ -3,13 +3,28 @@ import typing
 import os
 import sys
 import re
+import time
 import importlib
 import pyomo.environ as pe
-from pyomo.opt import SolverFactory
+from pyomo.opt import SolverFactory, SolverStatus, TerminationCondition
 from pyomo.contrib.iis import *
 from pyomo.core.expr.visitor import identify_mutable_parameters, replace_expressions, clone_expression
 # GPT
 from openai import OpenAI
+# llama_index
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.core import Settings
+from llama_index.readers.file import PDFReader
+from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, StorageContext, load_index_from_storage
+from llama_index.vector_stores.chroma import ChromaVectorStore
+import chromadb
+import chromadb.utils.embedding_functions as embedding_functions
+from llama_index.core import PromptTemplate
+
+
+Settings.embed_model = HuggingFaceEmbedding(
+    model_name="BAAI/bge-small-en-v1.5"
+)
 
 client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 import tiktoken
@@ -18,6 +33,13 @@ from dotenv import load_dotenv, find_dotenv
 _ = load_dotenv(find_dotenv())  # read local .env file
 
 
+def get_completion_general_stream(messages, gpt_model):
+    # client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
+    response = client.chat.completions.create(model=gpt_model,
+    messages = messages,
+    temperature=0,
+    stream=True)
+    return response
 
 def get_completion_general(messages, gpt_model):
     # client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
@@ -648,7 +670,8 @@ def get_completion_detailed(user_prompt, model_info, PYOMO_CODE, gpt_model):
     messages.append(user_prompt)
     response = client.chat.completions.create(model=gpt_model,
     messages=messages,
-    temperature=0)
+    temperature=0,
+    stream=True)
     return response
 
 def assign_value_to_parameter(value, param_name, indices, model):
@@ -1003,7 +1026,8 @@ def gpt_function_call(ai_response, param_names_aval, model, nature='get_index', 
     elif nature == "optimal_value":
         fn_call = ai_response.choices[0].message.tool_calls[0].function
     else:
-        fn_call = ai_response.choices[0].message.tool_calls[0].function
+        fn_call = ai_response.choices[0].message.function_call
+        print(fn_call.name)
         
     fn_name = fn_call.name
     arguments = fn_call.arguments
@@ -1012,6 +1036,7 @@ def gpt_function_call(ai_response, param_names_aval, model, nature='get_index', 
         return solve_the_model(param_names, param_names_aval, model), fn_name
     elif nature == "get_index":
         args = json.loads(arguments)
+        print(args)
         return solve_the_model_indexed_new(args, model), "solve_the_model_indexed_new"
     elif nature == "sensitivity_analysis":
         args = json.loads(arguments)
@@ -1038,6 +1063,7 @@ def add_slack_indexed_new(objs, model):
     for i in objs:
         param_name = i['parameter']
         indices = i['indices']
+        print(eval(f"model.{param_name}.is_indexed()"))
         if eval(f"model.{param_name}.is_indexed()"):
             for index in indices:
                 pass
@@ -1088,8 +1114,8 @@ def describe_optimal_solution(args, model, fn_name):
                 indices = variable['indices']
                 if variable_name in variables_n_indices.keys():
                     if variables_n_indices[variable_name]['is_indexed']:
-                        import pdb
-                        pdb.set_trace()
+                        # import pdb
+                        # pdb.set_trace()
                         if len(indices):
                             for idx in indices:
                                 if variables_n_indices[variable_name]['index_dim'] == 1:
@@ -1317,6 +1343,8 @@ def solve_sensitivity_indexed(args, model):
 
 def solve_the_model_indexed_new(args, model):
     model_copy = model.clone()
+    print('c5', [_ for _ in model_copy.component_objects(pe.Param)])
+    print('c6', args['index'])
     is_slack_added = add_slack_indexed_new(args['index'], model_copy)
     iis_param, replacements_list = generate_replacements_indexed_new(args['index'], model_copy)
     replace_const(replacements_list, model_copy)
@@ -1595,3 +1623,223 @@ def find_parameter_side(e, p):
         return "RHS"
     else:
         return "None"
+
+
+def load_python_file(filename):
+  with open(filename, 'r') as f:
+    file_contents = f.read()
+  exec(file_contents)
+
+
+
+
+
+def store_and_load_index(pyomo_file_path, model_summary):
+    namespace = load_python_file(pyomo_file_path)
+    db = chromadb.PersistentClient("../../chroma")
+ 
+    # Store the model summary
+    collection_name = pyomo_file_path.split('/')[-1].replace('.py', '')[-30:] + "_collection"
+    if collection_name not in [_.name for _ in db.list_collections()]:
+        collection = db.get_or_create_collection(collection_name)
+
+        collection.add(
+            documents=[model_summary],
+            ids = [f"{pyomo_file_path}_model_summary"]
+        )
+
+        with open(pyomo_file_path, "r") as f:
+            pyomo_code = f.read()
+        
+        collection.add(
+            documents=[pyomo_code],
+            ids = [f"{pyomo_file_path}_pyomo_code"]
+        )
+    else:
+        collection = db.get_collection(collection_name)
+
+    pyomo_source_code_collection = db.get_or_create_collection("pyomo_source")
+
+    docs = SimpleDirectoryReader("../../pyomo/").load_data()
+    pyomo_source_code_vector_store = ChromaVectorStore(chroma_collection=pyomo_source_code_collection)
+    pyomo_source_code_storage_context = StorageContext.from_defaults(vector_store=pyomo_source_code_vector_store)
+    pyomo_source_code_index = VectorStoreIndex.from_documents(docs, storage_context=pyomo_source_code_storage_context, embed_model=HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2"))
+
+
+
+    pyomo_source_code_collection.add(
+        documents=["../pyomo-readthedocs-io-en-latest.pdf"],
+        ids = ["pyomo_readthedocs"]
+    )
+    embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    vector_store = ChromaVectorStore(chroma_collection=collection)
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+    pyomo_model_index = VectorStoreIndex.from_vector_store(vector_store=vector_store, storage_context=storage_context, embed_model=embed_model)
+
+    # pyomo_source_code_vector_store = ChromaVectorStore(chroma_collection=pyomo_source_code_collection)
+    # pyomo_source_code_storage_context = StorageContext.from_defaults(vector_store=pyomo_source_code_vector_store)
+    # pyomo_source_code_index = VectorStoreIndex.from_vector_store(vector_store=pyomo_source_code_vector_store, storage_context=pyomo_source_code_storage_context, embed_model=embed_model)
+
+    
+    # codegen_prompt_template_str = (
+    # "Context information is below.\n"
+    # "---------------------\n"
+    # "{context_str}\n"
+    # "---------------------\n"
+    # "Instructions: Using the provided context and your knowledge of Python programming, generate a Python code snippet that addresses the user's query.\n" 
+    # "If the query is unclear or requires more information or cannot be satisfactorily answered based on the available context,\n" 
+    # "respond with 'Insufficient information to generate code.' and ask the user for more information that you need.\n" 
+    # "Otherwise, provide a concise, well-documented, and functional Python code snippet.\n"
+    # "If the user query is a 'Why does X happen?' type of question, use counterfactual explanation, i.e. please provide a code snippet that adds negation of X as an additional constraint and then re-solves the model to show that the model becomes infeasible.\n"
+    # "Lastly, Take note of the following:\n"
+    # "0. If the answer to the query doesn't require any code to be written, then give your answer as comments in the code.\n"
+    # " - as an example, if your answer is 'This problem is about bla, bla bla', then you can write the comment as '```python # This problem is about bla, bla bla```'.\n"
+    # "1. The code snippet should be a complete Python program that can be executed in REPL without any errors.\n"
+    # "2. An instance of the pyomo model is already created and stored in the variable 'model' as is available in REPL.\n"
+    # "3. The code snippets that you generate should be compatible with the pyomo library.\n"
+    # "4. I should be able to execute the code line by line in REPL without any errors.\n"
+    # "5. Generate the code snippet such that I can use it as an incremental change to the existing code, without having to re-declare and re-initialize all the variables.\n"
+    # "6. If the snippet is accessing the value of any pyomo/model component, then it should use `value()` function.\n"
+    # "Query: {query_str}\n"
+    # "Python Code Snippet: "
+    # )
+    codegen_prompt_template_str = (
+    "Context information is below.\n"
+    "---------------------\n"
+    "{context_str}\n"
+    "---------------------\n"
+    "Instructions: Using the provided context and your knowledge of Python programming, generate a Python code snippet that addresses the user's query.\n"
+    "If the query is unclear, requires more information, or cannot be satisfactorily answered based on the available context,\n"
+    "respond with 'Insufficient information to generate code.' and ask the user for more information that you need.\n"
+    "Otherwise, provide a concise, well-documented, and functional Python code snippet.\n"
+    "If the user query is a 'Why does X happen?' type of question, use counterfactual explanation, i.e., provide a code snippet that adds negation of X as an additional constraint and then re-solves the model to show that the model becomes infeasible.\n"
+    "Take note of the following guidelines:\n"
+    "0. If the answer to the query doesn't require any code to be written, give your answer as comments in the code.\n"
+    "   - For example, if your answer is 'This problem is about bla, bla bla', you can write the comment as '```python # This problem is about bla, bla bla```'.\n"
+    "1. The code snippet should be a complete Python program that can be executed in REPL without any errors.\n"
+    "2. An instance of the Pyomo model is already created and stored in the variable 'model' and is available in REPL.\n"
+    "3. The code snippets that you generate should be compatible with the Pyomo library.\n"
+    "4. The code should be executable line by line in REPL without any errors.\n"
+    "5. Generate the code snippet such that it can be used as an incremental change to the existing code, without having to re-declare and re-initialize all the variables.\n"
+    "6. If the snippet is accessing the value of any Pyomo/model component, use the `value()` function.\n"
+    "7. Always use the Gurobi solver if you have to solve the model.\n"
+    "8. Access only the available attributes of the model.\n"
+    "9. If the answer to the query is a variable or an expression in your snippet, print it using plain `print()` without setting any precision.\n"
+    "   - For example, use `print(variable)` or `print(expression)` to display the value as is.\n"
+    "10. If the query involves comparing values, use the original values without rounding.\n"
+    "11. If the query requires solving the model, use `solver = SolverFactory('gurobi')` and `solver.solve(model, tee=True)` to solve the model and display the solver output.\n"
+    "12. If the query asks to change the value of a Parameter in the Pyomo model, ensure that you change the value correctly:\n"
+    "    - First, store the old value: `old_value = model.my_param[p, q].value`\n"
+    "    - Then, set the new value: `model.my_parameter[idx1, idx2].set_value(new_value)`\n"
+    "Query: {query_str}\n"
+    "Python Code Snippet: "
+)
+
+    codegen_prompt_tpl = PromptTemplate(codegen_prompt_template_str)
+    
+    pyomo_model_query_engine = pyomo_model_index.as_query_engine(similarity_top_k=5)
+    pyomo_model_query_engine.update_prompts({"response_synthesizer:text_qa_template": codegen_prompt_tpl})
+
+    # code_check_template_str = (
+    # "Context information is below.\n"
+    # "---------------------\n"
+    # "{context_str}\n"
+    # "---------------------\n"
+    # "Instructions: Using the provided context and your knowledge of Pyomo library, check if the code given to you in the user's query is syntactically correct and uses the pyomo library correctly\n" 
+    # "Check only for syntax and usage of the pyomo library.\n"
+    # "and not for the correctness of the code.\n"
+    # "If the code is incorrect or incomplete, respond with '```python\n#The code is incorrect or incomplete.\n```' and generate the correct code.\n"
+    # "If the code is correct, respond with '```python\n# The code is correct.\n```'\n"
+    # "Note that sometimes the code will contain only comments, in that case, your response should be '```python\n# The code is correct.\n```' \n"
+    # "Lastly, check if the code is satisfying the following criteria:\n"
+    # "1. The code snippet should be a complete Python program that can be executed in REPL without any errors.\n"
+    # "2. An instance of the pyomo model is already created and stored in the variable 'model' as is available in REPL.\n"
+    # "3. The code snippet should be compatible with the pyomo library.\n"
+    # "4. One should be able to execute the code line by line in REPL without any errors.\n"
+    # "5. The code snippet is such that one can use it as an incremental change to the existing model definition, without having to re-declare and re-initialize.\n"
+    # "6. If the snippet is printing the value of any pyomo component, then it should use `value()` function.\n"
+    # "Query: {query_str}\n"
+    # "Python Code Snippet: "
+    # )
+    code_check_template_str = (
+    "Context information is below.\n"
+    "---------------------\n"
+    "{context_str}\n"
+    "---------------------\n"
+    "Instructions: Using the provided context and your knowledge of the Pyomo library, check if the code given to you as the user's query is syntactically correct and uses the Pyomo library correctly.\n"
+    "Check only for syntax and usage of the Pyomo library, not for the correctness of the code.\n"
+    "If the code is incorrect, incomplete, or does not meet the criteria listed below, respond with '```python\n# The code is incorrect, incomplete, or does not meet the criteria.\n```' followed by '```python\n# Here is the corrected code:\n# [Generated Code]\n```', where you replace '[Generated Code]' with the correct code.\n"
+    "If the code is correct and meets all the criteria, respond with '```python\n# The code is correct and meets all the criteria.\n```'\n"
+    "Note that sometimes the code will contain only comments. In that case, if the comments are valid and do not violate any criteria, your response should be '```python\n# The code is correct and meets all the criteria.\n```'\n"
+    "The code snippet should satisfy the following criteria:\n"
+    "1. It should be a complete Python program that can be executed in REPL without any errors.\n"
+    "2. An instance of the Pyomo model is already created and stored in the variable 'model', which is available in REPL.\n"
+    "3. The code snippet should be compatible with the Pyomo library.\n"
+    "4. One should be able to execute the code line by line in REPL without any errors.\n"
+    "5. The code snippet should be an incremental change to the existing model definition, without having to re-declare and re-initialize.\n"
+    "6. If the snippet is printing the value of any Pyomo component, it should use the `value()` function.\n"
+    "Query: {query_str}\n"
+    "Python Code Snippet: "
+)
+
+    code_check_tpl = PromptTemplate(code_check_template_str)
+
+    pyomo_source_code_query_engine = pyomo_source_code_index.as_query_engine(similarity_top_k=5)
+    pyomo_source_code_query_engine.update_prompts({"response_synthesizer:text_qa_template": code_check_tpl})
+        
+    
+    
+    return pyomo_model_query_engine, pyomo_source_code_query_engine, namespace
+
+
+
+def string_generator(long_string, chunk_size=100):
+    for i in range(0, len(long_string), chunk_size):
+        yield long_string[i:i+chunk_size]
+        time.sleep(0.1)  # Optionally add a small delay between each yield
+
+from get_code_from_markdown import *
+from io import StringIO
+from contextlib import redirect_stdout
+import contextlib
+
+# @contextlib.contextmanager
+# def stdoutIO(stdout=None):
+#     old = sys.stdout
+#     if stdout is None:
+#         stdout = StringIO()
+#     sys.stdout = stdout
+#     yield stdout
+#     sys.stdout = old
+
+
+def run_my_code(markdown_text, model, python_file_path, namespace=None):
+    blocks = get_code_from_markdown([markdown_text])
+
+    f = StringIO()
+    # with stdoutIO() as s:
+    with redirect_stdout(f):
+        for block in blocks:
+            exec(block)
+        # run_code_from_markdown_blocks(blocks, method=RunMethods.EXECUTE)
+    logs = f.getvalue()
+    return logs
+
+
+def extract_comments(markdown_text, model):
+    # Extract Python code blocks from the markdown text
+    code_blocks = re.findall(r'```python\n(.*?)\n```', markdown_text, re.DOTALL)
+    
+    comments = []
+    
+    # Redirect stdout to the log file
+    original_stdout = sys.stdout
+    for code_block in code_blocks:
+        # Extract comments from the code block
+        lines = code_block.split('\n')
+        for line in lines:
+            line = line.strip()
+            if line.startswith('#'):
+                comments.append(line)
+    
+    return comments, code_blocks
