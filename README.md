@@ -46,7 +46,7 @@ In the future work, we will add more functionalities such as specifying changes 
 [here](https://support.gurobi.com/hc/en-us/articles/360060996432-How-do-I-install-Gurobi-on-Windows-without-administrator-credentials-)
 4. Apply for an OpenAI API key [here](https://platform.openai.com/).  Add the key to your environment variables as ```OPENAI_API_KEY```
 5. To check whether the installation of gurobi and GPT is successful, at the root directory, run ```pytest tests/```. If the test passes, you are good to go. 
-6. Run GUI.py in the src folder ```python GUI.py``` to use the chatbot
+6. Change into ```src``` folder and run ```streamlit run streamlit_app.py```
 
 # Tutorial
 <a name="tutorial"></a>
