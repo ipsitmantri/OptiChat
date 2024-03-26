@@ -11,6 +11,8 @@ from pyomo.contrib.iis import *
 from pyomo.core.expr.visitor import identify_mutable_parameters, replace_expressions, clone_expression
 # GPT
 from openai import OpenAI
+import importlib.util
+from llama_index.core.node_parser import SentenceSplitter
 # llama_index
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core import Settings
@@ -22,9 +24,11 @@ import chromadb.utils.embedding_functions as embedding_functions
 from llama_index.core import PromptTemplate
 
 
-Settings.embed_model = HuggingFaceEmbedding(
-    model_name="BAAI/bge-small-en-v1.5"
-)
+# Settings.embed_model = HuggingFaceEmbedding(
+#     model_name="BAAI/bge-small-en-v1.5"
+# )
+
+Settings.text_splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=20)
 
 client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 import tiktoken
@@ -1628,14 +1632,21 @@ def find_parameter_side(e, p):
 def load_python_file(filename):
   with open(filename, 'r') as f:
     file_contents = f.read()
-  exec(file_contents)
+  exec(file_contents, globals(), locals())
 
-
+def load_python_file_v2(filename):
+    file_name = os.path.basename(filename)
+    module_name = os.path.splitext(file_name)[0]
+    spec = importlib.util.spec_from_file_location(module_name, filename)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 
 def store_and_load_index(pyomo_file_path, model_summary):
-    namespace = load_python_file(pyomo_file_path)
+    # namespace = load_python_file(pyomo_file_path)
+    namespace = load_python_file_v2(pyomo_file_path)
     db = chromadb.PersistentClient("../../chroma")
  
     # Store the model summary
